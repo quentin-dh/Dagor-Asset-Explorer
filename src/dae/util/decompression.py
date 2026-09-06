@@ -8,8 +8,7 @@ from ctypes import create_string_buffer, c_void_p, c_int64, c_int, c_size_t
 from os import path
 from zlib import decompress as zlibdecompress
 from zlib import compress as zlibcompress
-from pylzma import decompress as lzmadecompress
-from pylzma import compress as lzmacompress
+import lzma #use lzma
 from util.misc import loadDLL
 from struct import pack
 from util.fileread import *
@@ -199,7 +198,8 @@ def zlibCompress(data:bytes):
 	return zlibcompress(data)
 
 def lzmaDecompress(data:bytes):
-	return lzmadecompress(data)
+    return lzma.decompress(data)
 
 def lzmaCompress(data:bytes):
-	return lzmacompress(data)
+    return lzma.compress(data)
+#use lzma

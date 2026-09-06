@@ -1,3 +1,9 @@
+**NOTICE: This is a personal fork for testing and experimentation.**
+
+I am currently investigating a fix for a rare Unicode/ASCII decoding bug that occurs when exporting models with Cyrillic characters in node names (e.g., `suspension_с_02`), which triggers a `UnicodeDecodeError` in `realres.py`.
+
+This is a work in progress and not intended for production use.
+
 # Dagor Asset Explorer
 
 Dagor engine asset explorer and exporter coded in Python.

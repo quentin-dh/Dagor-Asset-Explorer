@@ -1341,7 +1341,7 @@ class GeomNodeTree(RealResData, ModelContainer):
 				
 				name += b
 			
-			return name.decode("ascii")
+			return name.decode("utf-8", errors='ignore') #Force the use of UTF-8 encoding
 
 		def __init__(self, file:BinBlock, main:BinBlock, idx:int):
 			self.tm = self.readMatrix4x4(file)
