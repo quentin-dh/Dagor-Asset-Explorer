@@ -202,8 +202,16 @@ class GameResourcePack(Pack): # may need cleanup / TODO: rewrite like DXP2
 			
 			resData:RealResData = None
 
-			if self.__classId in REALRES_CLASSES_DICT:
-				resData = REALRES_CLASSES_DICT[self.__classId](self.__grp.filePath,
+			classId = self.__classId
+			maskedClassId = classId & 0xFFFF0000
+
+			if classId in REALRES_CLASSES_DICT:
+				resData = REALRES_CLASSES_DICT[classId](self.__grp.filePath,
+						   name = self.__name,
+						   size = size, 
+						   offset = self.__offset)
+			elif maskedClassId in REALRES_CLASSES_DICT:
+				resData = REALRES_CLASSES_DICT[maskedClassId](self.__grp.filePath,
 						   name = self.__name,
 						   size = size, 
 						   offset = self.__offset)

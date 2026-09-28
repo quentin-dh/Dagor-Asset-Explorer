@@ -2349,6 +2349,14 @@ class CollisionGeom(RealResData, ModelContainer):
 			idxCnt = readInt(file) // 3
 			self.__faces:tuple[tuple[int, int, int]] = tuple(unpack("3I", file.read(0xC)) for _ in SafeRange(self, idxCnt))
 
+		def initFromV3(self, name:str, physMat:str, tm:tuple, bbox:tuple, verts:list, faces:list):
+			"""Initialize a CollNode from v3 format data."""
+			self.__name = name
+			self.physMat = physMat
+			self.bbox = bbox
+			self.__verts = tuple(verts)
+			self.__faces = tuple(faces)
+
 		def getVerts(self):
 			return self.__verts
 	
@@ -2367,9 +2375,16 @@ class CollisionGeom(RealResData, ModelContainer):
 
 		magic = readInt(file)
 
-		if magic != self.classId:
+		if (magic & 0xFFFF0000) != (self.classId & 0xFFFF0000):
 			raise Exception(f"Invalid magic: {magic}")
-		
+
+		magicLow = magic & 0xFFFF
+
+		# v3 format: data after magic is compressed
+		if magicLow != 0:
+			self.__readFileV3__(file, magicLow)
+			return
+
 		version = readInt(file)
 
 		if not version in CollisionGeom.VERSIONS:
@@ -2392,7 +2407,144 @@ class CollisionGeom(RealResData, ModelContainer):
 		nodeCnt = readInt(block)
 
 		self.__nodes = tuple(self.__createNode__(block, collisionFlags, version) for _ in SafeRange(self, nodeCnt))
-	
+
+	def __readFileV3__(self, file:BinFile, magicLow:int):
+		"""Read v3 compressed collision geometry format (magic 0xACE5000x)."""
+		from util.decompression import CompressedData
+
+		log.log(f"Reading v3 collision format (magic low=0x{magicLow:04X})")
+
+		cData = CompressedData(file)
+		decompressed = cData.decompressToBin()
+
+		if decompressed is None:
+			raise Exception("Failed to decompress v3 collision data")
+
+		d = decompressed.read()
+		log.log(f"Decompressed {len(d)} bytes")
+
+		# V3 format layout (decompressed):
+		# 0x00: bSphere (4 floats = 16 bytes)
+		# 0x10: bSphere2 (4 floats = 16 bytes)
+		# 0x20: bbox (6 floats = 24 bytes)
+		# 0x38: extra float (4 bytes)
+		# 0x3C: someCount (uint32)
+		# 0x40: nodeCount (uint32)
+		# 0x44: nodeCount2 (uint32)
+		# 0x48-0x63: reserved (28 bytes)
+		# 0x64: totalIndexRef (uint32)
+		# 0x68: unknown (uint32)
+		# 0x6C: nodeCount float pairs (nodeCount * 8 bytes)
+		# Then: nodeCount node descriptors (48 bytes each)
+		# Then: nodeCount transforms (48 bytes each)
+		# Then: per-node geometry data
+
+		ofs = 0x3C
+		someCount = unpack("<I", d[ofs:ofs+4])[0]; ofs += 4
+		nodeCount = unpack("<I", d[ofs:ofs+4])[0]; ofs += 4
+		nodeCount2 = unpack("<I", d[ofs:ofs+4])[0]; ofs += 4
+
+		log.log(f"V3 collision: {nodeCount} nodes")
+
+		# Skip to float pairs
+		ofs = 0x6C
+
+		# Read float pairs (nodeCount entries)
+		floatPairs = []
+		for _ in range(nodeCount):
+			fp = unpack("<ff", d[ofs:ofs+8])
+			floatPairs.append(fp)
+			ofs += 8
+
+		# Read node descriptors (48 bytes each)
+		# Layout: vertCount(4) + idxCount(4) + materialId(2) + pad(2) + parentNode(2) + pad(2)
+		#         + collisionType(4) + bbox_min(12) + bbox_max(12) + bSphere_r(4)
+		nodeDescs = []
+		for _ in range(nodeCount):
+			vertCnt, idxCnt = unpack("<II", d[ofs:ofs+8])
+			matId = unpack("<H", d[ofs+8:ofs+10])[0]
+			parentNode = unpack("<H", d[ofs+12:ofs+14])[0]
+			colType = unpack("<I", d[ofs+16:ofs+20])[0]
+			bboxMin = unpack("<fff", d[ofs+20:ofs+32])
+			bboxMax = unpack("<fff", d[ofs+32:ofs+44])
+			bsphR = unpack("<f", d[ofs+44:ofs+48])[0]
+			nodeDescs.append({
+				"vertCnt": vertCnt,
+				"idxCnt": idxCnt,
+				"matId": matId,
+				"parentNode": parentNode,
+				"colType": colType,
+				"bboxMin": bboxMin,
+				"bboxMax": bboxMax,
+				"bsphR": bsphR,
+			})
+			ofs += 48
+
+		# Read transforms (48 bytes = 12 floats: 3x3 rotation + 3 translation)
+		transforms = []
+		for _ in range(nodeCount):
+			tm = unpack("<12f", d[ofs:ofs+48])
+			transforms.append(tm)
+			ofs += 48
+
+		geomDataStart = ofs
+
+		# V3 geometry data uses a proprietary quantized format (10-10-10-2 packed vertices)
+		# with an index encoding that hasn't been fully reverse-engineered.
+		# We create bbox approximation meshes from the node descriptors and transforms.
+
+		scaleFix = (
+			(1, 0, 0, 0),
+			(0, 0, 1, 0),
+			(0, 1, 0, 0),
+			(0, 0, 0, 1),
+		)
+
+		nodes = []
+
+		for i in range(nodeCount):
+			desc = nodeDescs[i]
+			tm_raw = transforms[i]
+
+			hasMesh = desc["idxCnt"] > 0 and desc["vertCnt"] > 0
+
+			if hasMesh:
+				bmin = desc["bboxMin"]
+				bmax = desc["bboxMax"]
+
+				# Build 4x4 transform matrix
+				tm = (
+					(tm_raw[0], tm_raw[1], tm_raw[2], 0),
+					(tm_raw[3], tm_raw[4], tm_raw[5], 0),
+					(tm_raw[6], tm_raw[7], tm_raw[8], 0),
+					(tm_raw[9], tm_raw[10], tm_raw[11], 1),
+				)
+				tm = matrixMul(tm, scaleFix)
+
+				# Create bbox mesh approximation
+				bverts_local = [
+					(bmin[0], bmin[1], bmin[2]), (bmax[0], bmin[1], bmin[2]),
+					(bmax[0], bmax[1], bmin[2]), (bmin[0], bmax[1], bmin[2]),
+					(bmin[0], bmin[1], bmax[2]), (bmax[0], bmin[1], bmax[2]),
+					(bmax[0], bmax[1], bmax[2]), (bmin[0], bmax[1], bmax[2]),
+				]
+				bverts = []
+				for v in bverts_local:
+					tv = vectorTransform(tm, v)
+					bverts.append((tv[0], tv[2], tv[1]))
+				bfaces = [
+					(0,1,2), (0,2,3), (4,6,5), (4,7,6),
+					(0,4,5), (0,5,1), (2,6,7), (2,7,3),
+					(0,3,7), (0,7,4), (1,5,6), (1,6,2),
+				]
+
+				node = CollisionGeom.CollNode()
+				node.initFromV3(f"node_{i:03d}", "default", tm, (bmin, bmax), bverts, bfaces)
+				nodes.append(node)
+
+		self.__nodes = tuple(nodes)
+		log.log(f"V3 collision: loaded {len(nodes)} bbox mesh nodes")
+
 	def __createNode__(self, block:BinBlock, collisionFlags:int, version:int):
 		node = CollisionGeom.CollNode()
 		self.setSubTask(node)
